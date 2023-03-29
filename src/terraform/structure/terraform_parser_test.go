@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -91,6 +92,7 @@ func TestTerrraformParser_ParseFile(t *testing.T) {
 			"instance_merged_var":                       {"yor_trace": "4329587194", "git_org": "bana"},
 			"instance_merged_override":                  {"Environment": "new_env"},
 			"aurora_cluster_bastion_auto_scaling_group": {"git_org": "bridgecrewio", "git_repo": "platform", "yor_trace": "48564943-4cfc-403c-88cd-cbb207e0d33e", "Name": "bc-aurora-bastion"},
+			"instance_null_tags":                        nil,
 		}
 
 		parsedBlocks, err := p.ParseFile(filePath)
@@ -151,11 +153,10 @@ func TestTerrraformParser_Module(t *testing.T) {
 		}()
 		p := &TerrraformParser{}
 		blameLines := CreateComplexTagsLines()
-		gitService := &gitservice.GitService{
-			BlameByFile: map[string]*git.BlameResult{filePath: {
-				Lines: blameLines,
-			}},
-		}
+		gitService := &gitservice.GitService{}
+		var blameByFile sync.Map
+		blameByFile.Store(filePath, &git.BlameResult{Lines: blameLines})
+		gitService.BlameByFile = &blameByFile
 		tagGroup := &gittag.TagGroup{GitService: gitService}
 		c2cTagGroup := &code2cloud.TagGroup{}
 		tagGroup.InitTagGroup(rootDir, nil)
@@ -172,6 +173,9 @@ func TestTerrraformParser_Module(t *testing.T) {
 		}
 
 		for _, block := range parsedBlocks {
+			if utils.InSlice([]string{"aws_autoscaling_group.autoscaling_group", "aws_autoscaling_group.autoscaling_group_tagged"}, block.GetResourceID()) {
+				assert.False(t, block.IsBlockTaggable())
+			}
 			if block.IsBlockTaggable() {
 				_ = tagGroup.CreateTagsForBlock(block)
 				_ = c2cTagGroup.CreateTagsForBlock(block)
@@ -195,6 +199,61 @@ func TestTerrraformParser_Module(t *testing.T) {
 					if tag.GetKey() == yorTagKey || strings.ReplaceAll(tag.GetKey(), `"`, "") == yorTagKey {
 						isYorTagExists = true
 					}
+				}
+				if !isYorTagExists {
+					t.Error(fmt.Sprintf("tag not found on merged block %v", yorTagKey))
+				}
+			}
+		}
+	})
+
+	t.Run("Parse a file with escaped tags, tag its blocks, and write them to the file", func(t *testing.T) {
+		rootDir := "../../../tests/terraform/resources/k8s_tf"
+		filePath := "../../../tests/terraform/resources/k8s_tf/main.tf"
+		originFileBytes, _ := ioutil.ReadFile(filePath)
+		defer func() {
+			_ = ioutil.WriteFile(filePath, originFileBytes, 0644)
+		}()
+		p := &TerrraformParser{}
+		c2cTagGroup := &code2cloud.TagGroup{}
+		c2cTagGroup.InitTagGroup("", nil)
+		p.Init(rootDir, nil)
+		writeFilePath := "../../../tests/terraform/resources/k8s_tf/main.tf"
+		writeFileBytes, _ := ioutil.ReadFile(writeFilePath)
+		defer func() {
+			_ = ioutil.WriteFile(writeFilePath, writeFileBytes, 0644)
+		}()
+		parsedBlocks, err := p.ParseFile(filePath)
+		if err != nil {
+			t.Errorf("failed to read hcl file because %s", err)
+		}
+
+		for _, block := range parsedBlocks {
+			if block.IsBlockTaggable() {
+				_ = c2cTagGroup.CreateTagsForBlock(block)
+			} else {
+				assert.Fail(t, fmt.Sprintf("Block %v should be taggable!", block.GetResourceID()))
+			}
+		}
+
+		err = p.WriteFile(filePath, parsedBlocks, writeFilePath)
+		if err != nil {
+			t.Error(err)
+		}
+		parsedTaggedFileTags, err := p.ParseFile(writeFilePath)
+		if err != nil {
+			t.Error(err)
+		}
+
+		for _, block := range parsedTaggedFileTags {
+			if block.IsBlockTaggable() {
+				isYorTagExists := false
+				yorTagKey := tags.YorTraceTagKey
+				for _, tag := range block.GetExistingTags() {
+					if tag.GetKey() == yorTagKey || strings.ReplaceAll(tag.GetKey(), `"`, "") == yorTagKey {
+						isYorTagExists = true
+					}
+					assert.NotEqualf(t, "kubernetes.io/cluster/$${local.prefix}", tag.GetKey(), "Bad tag exists!")
 				}
 				if !isYorTagExists {
 					t.Error(fmt.Sprintf("tag not found on merged block %v", yorTagKey))

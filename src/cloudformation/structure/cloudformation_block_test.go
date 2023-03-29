@@ -1,14 +1,14 @@
 package structure
 
 import (
+	goformationTags "github.com/awslabs/goformation/v5/cloudformation/tags"
 	"sort"
 	"testing"
 
 	"github.com/bridgecrewio/yor/src/common/structure"
 	"github.com/bridgecrewio/yor/src/common/tagging/tags"
 
-	"github.com/awslabs/goformation/v4"
-	"github.com/awslabs/goformation/v4/cloudformation/ec2"
+	"github.com/awslabs/goformation/v5"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -71,8 +71,8 @@ func updateCFNTags(templatePath string, t *testing.T) {
 
 	b.UpdateTags()
 
-	currentRawBlock := b.RawBlock.(*ec2.Volume)
-	currentTags := currentRawBlock.Tags
+	currentRawBlock := b.RawBlock.(map[string]interface{})
+	currentTags := currentRawBlock["Properties"].(map[string]interface{})["Tags"].([]goformationTags.Tag)
 	sort.Slice(expectedMergedTags, func(i, j int) bool {
 		return expectedMergedTags[i].GetKey() > expectedMergedTags[j].GetKey()
 	})

@@ -87,6 +87,9 @@ func tagCommand() *cli.Command {
 	tagGroupArg := "tag-groups"
 	outputJSONFileArg := "output-json-file"
 	externalConfPath := "config-file"
+	skipResourceTypesArg := "skip-resource-types"
+	parsersArgs := "parsers"
+	dryRunArgs := "dry-run"
 	return &cli.Command{
 		Name:                   "tag",
 		Usage:                  "apply tagging across your directory",
@@ -94,15 +97,18 @@ func tagCommand() *cli.Command {
 		UseShortOptionHandling: true,
 		Action: func(c *cli.Context) error {
 			options := clioptions.TagOptions{
-				Directory:      c.String(directoryArg),
-				Tag:            c.StringSlice(tagArg),
-				SkipTags:       c.StringSlice(skipTagsArg),
-				CustomTagging:  c.StringSlice(customTaggingArg),
-				SkipDirs:       c.StringSlice(skipDirsArg),
-				Output:         c.String(outputArg),
-				OutputJSONFile: c.String(outputJSONFileArg),
-				TagGroups:      c.StringSlice(tagGroupArg),
-				ConfigFile:     c.String(externalConfPath),
+				Directory:         c.String(directoryArg),
+				Tag:               c.StringSlice(tagArg),
+				SkipTags:          c.StringSlice(skipTagsArg),
+				CustomTagging:     c.StringSlice(customTaggingArg),
+				SkipDirs:          c.StringSlice(skipDirsArg),
+				Output:            c.String(outputArg),
+				OutputJSONFile:    c.String(outputJSONFileArg),
+				TagGroups:         c.StringSlice(tagGroupArg),
+				ConfigFile:        c.String(externalConfPath),
+				SkipResourceTypes: c.StringSlice(skipResourceTypesArg),
+				Parsers:           c.StringSlice(parsersArgs),
+				DryRun:            c.Bool(dryRunArgs),
 			}
 
 			options.Validate()
@@ -167,6 +173,25 @@ func tagCommand() *cli.Command {
 				Name:        externalConfPath,
 				Usage:       "external tag group configuration file path",
 				DefaultText: "/path/to/conf/file/ (.yml/.yaml extension)",
+			},
+			&cli.StringSliceFlag{
+				Name:        skipResourceTypesArg,
+				Usage:       "skip resource types for tagging",
+				Value:       cli.NewStringSlice(),
+				DefaultText: "aws_rds_instance,AWS::S3::Bucket",
+			},
+			&cli.StringSliceFlag{
+				Name:        parsersArgs,
+				Aliases:     []string{"i"},
+				Usage:       "IAC types to tag",
+				Value:       cli.NewStringSlice("Terraform", "CloudFormation", "Serverless"),
+				DefaultText: "Terraform,CloudFormation,Serverless",
+			},
+			&cli.BoolFlag{
+				Name:        dryRunArgs,
+				Usage:       "skip resource tagging",
+				Value:       false,
+				DefaultText: "false",
 			},
 		},
 	}

@@ -93,6 +93,7 @@ func Test_TagCFNDir(t *testing.T) {
 		options := clioptions.TagOptions{
 			Directory: "../../../tests/cloudformation/resources/ebs",
 			TagGroups: taggingUtils.GetAllTagGroupsNames(),
+			Parsers:   []string{"Terraform", "CloudFormation", "Serverless"},
 		}
 		filePath := options.Directory + "/ebs.yaml"
 
@@ -112,6 +113,7 @@ func Test_TagCFNDir(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
+		assert.Equal(t, 10, runner.workersNum)
 		runner.TagGroups[0] = mockGitTagGroup
 		_, err = runner.TagDirectory()
 		if err != nil {
@@ -153,7 +155,11 @@ func TestRunnerInternals(t *testing.T) {
 	t.Run("Test isFileSkipped", func(t *testing.T) {
 		runner := Runner{}
 		rootDir := "../../../tests/terraform"
-		skippedFiles := []string{"../../../tests/terraform/mixed/mixed.tf", "../../../tests/terraform/resources/tagged/complex_tags_tagged.tf"}
+		skippedFiles := []string{
+			"../../../tests/terraform/mixed/mixed.tf",
+			"../../../tests/terraform/resources/tagged/complex_tags_tagged.tf",
+			"../../../tests/terraform/resources/tagged/expected.txt",
+		}
 		_ = runner.Init(&clioptions.TagOptions{
 			Directory: rootDir,
 			SkipDirs:  []string{"../../../tests/terraform/mixed", "../../../tests/terraform/resources/tagged/"},
@@ -182,7 +188,7 @@ func TestRunnerInternals(t *testing.T) {
 			return nil
 		})
 
-		assert.Equal(t, 2, len(skippedFiles), "Some files were not skipped")
+		assert.Equal(t, 1, len(skippedFiles), "Some files were not skipped")
 	})
 
 	t.Run("Test skip entire dir", func(t *testing.T) {
@@ -209,7 +215,7 @@ func initMockGitTagGroup(rootDir string, filesToBlames map[string]string) *gitta
 	for filePath := range filesToBlames {
 		blameSrc, _ := ioutil.ReadFile(filesToBlames[filePath])
 		blame := blameutils.CreateMockBlame(blameSrc)
-		gitService.BlameByFile[filePath] = &blame
+		gitService.BlameByFile.Store(filePath, &blame)
 	}
 
 	gitTagGroup := gittag.TagGroup{}

@@ -1,17 +1,19 @@
+[![Hacktoberfest](https://github.com/bridgecrewio/checkov/raw/master/docs/web/images/Hacktoberfest-1.png)](https://bridgecrew.io/blog/happy-hacktoberfest-2021/?utm_source=github&utm_medium=organic_oss&utm_campaign=yor)
+
 <img src="https://raw.githubusercontent.com/bridgecrewio/yor/master/docs/yor-logo.png?" width="350">
 
-[![Maintained by Bridgecrew.io](https://img.shields.io/badge/maintained%20by-bridgecrew.io-blueviolet)](https://bridgecrew.io/?utm_source=github&utm_medium=organic_oss&utm_campaign=yor) 
+[![Maintained by Bridgecrew.io](https://img.shields.io/badge/maintained%20by-bridgecrew.io-blueviolet)](https://bridgecrew.io/?utm_source=github&utm_medium=organic_oss&utm_campaign=yor)
 ![golangci-lint](https://github.com/bridgecrewio/yor/workflows/tests/badge.svg)
 [![security](https://github.com/bridgecrewio/yor/actions/workflows/security.yml/badge.svg)](https://github.com/bridgecrewio/yor/actions/workflows/security.yml)
 <a href='https://github.com/jpoles1/gopherbadger' target='_blank'>![gopherbadger-tag-do-not-edit](https://img.shields.io/badge/Go%20Coverage-81%25-brightgreen.svg?longCache=true&style=flat)</a>
-[![slack-community](https://slack.bridgecrew.io/badge.svg)](https://slack.bridgecrew.io/?utm_source=github&utm_medium=organic_oss&utm_campaign=yor)
+[![slack-community](https://img.shields.io/badge/Slack-4A154B?style=plastic&logo=slack&logoColor=white)](https://slack.bridgecrew.io/)
 [![Go Report Card](https://goreportcard.com/badge/github.com/bridgecrewio/yor)](https://goreportcard.com/report/github.com/bridgecrewio/yor)
 [![Go Reference](https://pkg.go.dev/badge/github.com/bridgecrewio/yor.svg)](https://pkg.go.dev/github.com/bridgecrewio/yor)
 [![Docker pulls](https://img.shields.io/docker/pulls/bridgecrew/yor.svg)](https://hub.docker.com/r/bridgecrew/yor)
 [![Chocolatey downloads](https://img.shields.io/chocolatey/dt/yor?label=chocolatey_downloads)](https://community.chocolatey.org/packages/yor)
 [![GitHub All Releases](https://img.shields.io/github/downloads/bridgecrewio/yor/total)](https://github.com/bridgecrewio/yor/releases)
 
-Yor is an open-source tool that helps add informative and consistent tags across infrastructure-as-code frameworks such as Terraform, CloudFormation, and Serverless. 
+Yor is an open-source tool that helps add informative and consistent tags across infrastructure-as-code frameworks such as Terraform, CloudFormation, and Serverless.
 
 Yor is built to run as a [GitHub Action](https://github.com/bridgecrewio/yor-action) automatically adding consistent tagging logics to your IaC. Yor can also run as a pre-commit hook and a standalone CLI.
 
@@ -21,6 +23,7 @@ Yor is built to run as a [GitHub Action](https://github.com/bridgecrewio/yor-act
 * Change management: git-based tags automatically add org, repo, commit and modifier details on every resource block.  
 * Custom taggers: user-defined tagging logics can be added to run using Yor.
 * Skips: inline annotations enable developers to exclude paths that should not be tagged.
+* Dry-Run: get a preview of what tags will be added without applying any.
 
 ## Demo
 [![](docs/yor_tag_and_trace_recording.gif)](https://raw.githubusercontent.com/bridgecrewio/yor/main/docs/yor_tag_and_trace_recording.gif)
@@ -175,22 +178,28 @@ yor tag -d path/to/files --skip-dirs path/to/files/skip,path/to/files/another/sk
 ```sh
 yor list-tag-groups
  # List tag classes that are built into yor.
- 
+
 yor list-tags
  # List all the tags built into yor
 yor list-tags --tag-groups git
- 
+
  # List all the tags built into yor under the tag group git
+```
+
+`dry-run`
+```sh
+yor tag -d . --dry-run
+# Perform a dry run to get a preview in the CLI output of all of the tags that will be added using Yor without applying any changes to your IaC files.
 ```
 ### What is Yor trace?
 yor_trace is a magical tag creating a unique identifier for an IaC resource code block.
 
 Having a yor_trace in place can help with tracing code block to its cloud provisioned resources without access to sensitive data such as plan or state files.
 
-See demo [here](#Trace-IaC-code-to-cloud-resource)
+See demo [here](https://yor.io/4.Use%2520Cases/useCases.html)
 ## Contributing
 
-Contribution is welcomed! 
+Contribution is welcomed!
 
 We are working on extending Yor and adding more parsers (to support additional IaC frameworks) and more taggers (to tag using other contextual data).
 

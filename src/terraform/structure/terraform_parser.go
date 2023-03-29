@@ -7,9 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/bridgecrewio/yor/src/common"
 	"github.com/bridgecrewio/yor/src/common/logger"
@@ -33,9 +33,12 @@ var unsupportedTerraformBlocks = []string{
 	"aws_lb_listener_rule",  // This resource does not support tags, although docs state otherwise.
 }
 
+var taggableResourcesLock sync.RWMutex
+var hclWriteLock sync.Mutex
+
 type TerrraformParser struct {
 	rootDir                string
-	providerToClientMap    map[string]tfschema.Client
+	providerToClientMap    sync.Map
 	taggableResourcesCache map[string]bool
 	tagModules             bool
 	terraformModule        *TerraformModule
@@ -50,7 +53,6 @@ func (p *TerrraformParser) Name() string {
 
 func (p *TerrraformParser) Init(rootDir string, args map[string]string) {
 	p.rootDir = rootDir
-	p.providerToClientMap = make(map[string]tfschema.Client)
 	p.taggableResourcesCache = make(map[string]bool)
 	p.tagModules = true
 	p.terraformModule = NewTerraformModule(rootDir)
@@ -60,6 +62,16 @@ func (p *TerrraformParser) Init(rootDir string, args map[string]string) {
 	p.moduleImporter = &command.GetCommand{Meta: command.Meta{Color: false, Ui: customTfLogger{}}}
 	pwd, _ := os.Getwd()
 	p.moduleInstallDir = filepath.Join(pwd, ".terraform", "modules")
+}
+
+func (p *TerrraformParser) Close() {
+	p.providerToClientMap.Range(func(provider, iClient interface{}) bool {
+		client := iClient.(tfschema.Client)
+		logger.MuteLogging()
+		client.Close()
+		logger.UnmuteLogging()
+		return true
+	})
 }
 
 func (p *TerrraformParser) GetSkippedDirs() []string {
@@ -100,9 +112,13 @@ func (p *TerrraformParser) GetSourceFiles(directory string) ([]string, error) {
 	return files, nil
 }
 
+func (p *TerrraformParser) ValidFile(_ string) bool {
+	return true
+}
+
 func (p *TerrraformParser) ParseFile(filePath string) ([]structure.IBlock, error) {
-	// read file bytes
 	// #nosec G304
+	// read file bytes
 	src, err := ioutil.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file %s because %s", filePath, err)
@@ -155,8 +171,8 @@ func (p *TerrraformParser) ParseFile(filePath string) ([]structure.IBlock, error
 }
 
 func (p *TerrraformParser) WriteFile(readFilePath string, blocks []structure.IBlock, writeFilePath string) error {
-	// read file bytes
 	// #nosec G304
+	// read file bytes
 	src, err := ioutil.ReadFile(readFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to read file %s because %s", readFilePath, err)
@@ -187,9 +203,6 @@ func (p *TerrraformParser) WriteFile(readFilePath string, blocks []structure.IBl
 	}
 
 	tempFile, err := ioutil.TempFile(filepath.Dir(readFilePath), "temp.*.tf")
-	defer func() {
-		_ = os.Remove(tempFile.Name())
-	}()
 	if err != nil {
 		return err
 	}
@@ -197,6 +210,8 @@ func (p *TerrraformParser) WriteFile(readFilePath string, blocks []structure.IBl
 	if err != nil {
 		return err
 	}
+	hclWriteLock.Lock()
+	defer hclWriteLock.Unlock()
 	_, err = hclFile.WriteTo(fd)
 	if err != nil {
 		return err
@@ -205,6 +220,14 @@ func (p *TerrraformParser) WriteFile(readFilePath string, blocks []structure.IBl
 	_, err = p.ParseFile(tempFile.Name())
 	if err != nil {
 		return fmt.Errorf("editing file %v resulted in malformed terraform, please open a github issue with the relevant details", readFilePath)
+	}
+	err = tempFile.Close()
+	if err != nil {
+		return err
+	}
+	err = os.Remove(tempFile.Name())
+	if err != nil {
+		return err
 	}
 
 	// #nosec G304
@@ -217,6 +240,9 @@ func (p *TerrraformParser) WriteFile(readFilePath string, blocks []structure.IBl
 		return fmt.Errorf("failed to write HCL file %s, %s", readFilePath, err.Error())
 	}
 	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = fd.Close(); err != nil {
 		return err
 	}
 	return nil
@@ -250,11 +276,12 @@ func (p *TerrraformParser) modifyBlockTags(rawBlock *hclwrite.Block, parsedBlock
 
 		var replacedTags []tags.ITag
 		var newTags []tags.ITag
+		possibleTagKeys := p.extractTagKeysFromRawTokens(rawTagsTokens)
 		for _, tag := range mergedTags {
 			tagReplaced := false
 			strippedTagKey := strings.ReplaceAll(tag.GetKey(), `"`, "")
-			for _, rawTagsToken := range rawTagsTokens {
-				if string(rawTagsToken.Bytes) == tag.GetKey() || string(rawTagsToken.Bytes) == strippedTagKey {
+			for _, t := range possibleTagKeys {
+				if t == tag.GetKey() || t == strippedTagKey {
 					replacedTags = append(replacedTags, tag)
 					tagReplaced = true
 					break
@@ -291,7 +318,14 @@ func (p *TerrraformParser) modifyBlockTags(rawBlock *hclwrite.Block, parsedBlock
 
 		if !isMergeOpExists && !isRenderedAttribute {
 			newTagsTokens := buildTagsTokens(newTags)
-			rawTagsTokens = InsertTokens(rawTagsTokens, newTagsTokens[2:len(newTagsTokens)-2])
+			if len(rawTagsTokens) == 1 {
+				// The line is:
+				//    tags = null
+				// => we should replace it!
+				rawTagsTokens = newTagsTokens
+			} else {
+				rawTagsTokens = InsertTokens(rawTagsTokens, newTagsTokens[2:len(newTagsTokens)-2])
+			}
 			rawBlock.Body().SetAttributeRaw(tagsAttributeName, rawTagsTokens)
 			return
 		}
@@ -333,12 +367,52 @@ func (p *TerrraformParser) modifyBlockTags(rawBlock *hclwrite.Block, parsedBlock
 	}
 }
 
+func (p *TerrraformParser) extractTagKeysFromRawTokens(rawTagsTokens hclwrite.Tokens) []string {
+	var tokens []string
+	for _, t := range rawTagsTokens {
+		tokens = append(tokens, string(t.Bytes))
+	}
+	var possibleTagKeys []string
+	var currentToken string
+	var inInterpolation bool
+	for _, t := range tokens {
+		switch t {
+		case "{":
+			continue
+		case "${":
+			currentToken = fmt.Sprintf("%v%v", currentToken, t)
+			inInterpolation = true
+		case "}":
+			if inInterpolation {
+				currentToken = fmt.Sprintf("%v%v", currentToken, t)
+				inInterpolation = false
+			} else {
+				continue
+			}
+		case "=", "\n", ",":
+			possibleTagKeys = append(possibleTagKeys, currentToken)
+			currentToken = ""
+		default:
+			currentToken = fmt.Sprintf("%v%v", currentToken, t)
+		}
+	}
+	// Cleanup unnecessary quotes around tag name
+	for i, t := range possibleTagKeys {
+		if strings.HasPrefix(t, "\"") && strings.HasSuffix(t, "\"") && len(t) > 2 {
+			possibleTagKeys[i] = t[1 : len(t)-1]
+		}
+	}
+	return possibleTagKeys
+}
+
 func buildTagsTokens(tags []tags.ITag) hclwrite.Tokens {
 	tagsMap := make(map[string]cty.Value, len(tags))
 	for _, tag := range tags {
 		tagsMap[tag.GetKey()] = cty.StringVal(tag.GetValue())
 	}
 	if len(tagsMap) > 0 {
+		hclWriteLock.Lock()
+		defer hclWriteLock.Unlock()
 		return hclwrite.TokensForValue(cty.MapVal(tagsMap))
 	}
 	return nil
@@ -374,23 +448,17 @@ func (p *TerrraformParser) parseBlock(hclBlock *hclwrite.Block, filePath string)
 	var existingTags []tags.ITag
 	isTaggable := false
 	var tagsAttributeName string
+	var resourceType string
+	var err error
+
 	switch hclBlock.Type() {
 	case ResourceBlockType:
-		resourceType := hclBlock.Labels()[0]
+		resourceType = hclBlock.Labels()[0]
 		providerName := getProviderFromResourceType(resourceType)
 		if utils.InSlice(SkippedProviders, providerName) {
 			return nil, fmt.Errorf("resource belongs to skipped provider %s", providerName)
 		}
-		client := p.getClient(providerName)
-		if client == nil {
-			return nil, fmt.Errorf("could not find client of %s", providerName)
-		}
-		logger.MuteLogging()
-		resourceScheme, err := client.GetResourceTypeSchema(resourceType)
-		logger.UnmuteLogging()
-		if err != nil {
-			return nil, err
-		}
+
 		tagsAttributeName, err = p.getTagsAttributeName(hclBlock)
 		if err != nil {
 			return nil, err
@@ -403,34 +471,15 @@ func (p *TerrraformParser) parseBlock(hclBlock *hclwrite.Block, filePath string)
 				return nil, err
 			}
 		}
-		if isSchemeViolated := p.isSchemeViolated(hclBlock, tagsAttributeName, resourceScheme); isSchemeViolated {
-			return nil, nil
-		}
 	case ModuleBlockType:
-		moduleSource := string(hclBlock.Body().GetAttribute("source").Expr().BuildTokens(hclwrite.Tokens{}).Bytes())
-		// source is always wrapped in " front and back
-		moduleSource = strings.Trim(moduleSource, "\" ")
-		if !isRemoteModule(moduleSource) && !isTerraformRegistryModule(moduleSource) {
-			// Don't use the tags label on local modules - the underlying resources will be tagged by themselves
-			isTaggable = false
-		} else {
-			// This is a remote module - if it has tags attribute, tag it!
-			moduleProvider := ExtractProviderFromModuleSrc(moduleSource)
-			possibleTagAttributeNames := []string{"extra_tags", "tags"}
-			if val, ok := ProviderToTagAttribute[moduleProvider]; ok {
-				possibleTagAttributeNames = append(possibleTagAttributeNames, val)
+		resourceType = "module"
+		defer func() {
+			if e := recover(); e != nil {
+				logger.Warning(fmt.Sprintf("Failed to parse module module.%v (%v)", strings.Join(hclBlock.Labels(), "."), filePath))
+				err = fmt.Errorf("failed to parse module.%v", strings.Join(hclBlock.Labels(), "."))
 			}
-			for _, tan := range possibleTagAttributeNames {
-				existingTags, isTaggable = p.getExistingTags(hclBlock, tan)
-				if isTaggable {
-					tagsAttributeName = tan
-					break
-				}
-			}
-			if !isTaggable {
-				isTaggable, tagsAttributeName = p.isModuleTaggable(filePath, strings.Join(hclBlock.Labels(), "."), possibleTagAttributeNames)
-			}
-		}
+		}()
+		isTaggable, existingTags, tagsAttributeName = p.extractTagsFromModule(hclBlock, filePath, isTaggable, existingTags, tagsAttributeName)
 	}
 
 	terraformBlock := TerraformBlock{
@@ -438,10 +487,39 @@ func (p *TerrraformParser) parseBlock(hclBlock *hclwrite.Block, filePath string)
 			ExitingTags:       existingTags,
 			IsTaggable:        isTaggable,
 			TagsAttributeName: tagsAttributeName,
+			Type:              resourceType,
 		},
 	}
 
-	return &terraformBlock, nil
+	return &terraformBlock, err
+}
+
+func (p *TerrraformParser) extractTagsFromModule(hclBlock *hclwrite.Block, filePath string, isTaggable bool, existingTags []tags.ITag, tagsAttributeName string) (bool, []tags.ITag, string) {
+	moduleSource := string(hclBlock.Body().GetAttribute("source").Expr().BuildTokens(hclwrite.Tokens{}).Bytes())
+	// source is always wrapped in " front and back
+	moduleSource = strings.Trim(moduleSource, "\" ")
+	if !isRemoteModule(moduleSource) && !isTerraformRegistryModule(moduleSource) {
+		// Don't use the tags label on local modules - the underlying resources will be tagged by themselves
+		isTaggable = false
+	} else {
+		// This is a remote module - if it has tags attribute, tag it!
+		moduleProvider := ExtractProviderFromModuleSrc(moduleSource)
+		possibleTagAttributeNames := []string{"extra_tags", "tags"}
+		if val, ok := ProviderToTagAttribute[moduleProvider]; ok {
+			possibleTagAttributeNames = append(possibleTagAttributeNames, val)
+		}
+		for _, tan := range possibleTagAttributeNames {
+			existingTags, isTaggable = p.getExistingTags(hclBlock, tan)
+			if isTaggable {
+				tagsAttributeName = tan
+				break
+			}
+		}
+		if !isTaggable {
+			isTaggable, tagsAttributeName = p.isModuleTaggable(filePath, strings.Join(hclBlock.Labels(), "."), possibleTagAttributeNames)
+		}
+	}
+	return isTaggable, existingTags, tagsAttributeName
 }
 
 func ExtractProviderFromModuleSrc(source string) string {
@@ -470,7 +548,7 @@ func (p *TerrraformParser) isModuleTaggable(fp string, moduleName string, tagAtt
 	actualPath, _ := filepath.Rel(p.rootDir, filepath.Dir(fp))
 	absRootPath, _ := filepath.Abs(p.rootDir)
 	actualPath, _ = filepath.Abs(filepath.Join(absRootPath, actualPath))
-	if !utils.InSlice(p.downloadedPaths, fp) {
+	if !utils.InSlice(p.downloadedPaths, fp) && os.Getenv("YOR_DISABLE_TF_MODULE_DOWNLOAD") != "TRUE" {
 		logger.MuteLogging()
 		logger.Info(fmt.Sprintf("Downloading modules for dir %v\n", actualPath))
 		_ = p.moduleImporter.Run([]string{actualPath})
@@ -499,28 +577,6 @@ func (p *TerrraformParser) isModuleTaggable(fp string, moduleName string, tagAtt
 	}
 
 	return false, ""
-}
-
-func (p *TerrraformParser) isSchemeViolated(hclBlock *hclwrite.Block, tagsAttributeName string, resourceScheme *tfschema.Block) bool {
-	bodyTokens := hclBlock.Body().BuildTokens(hclwrite.Tokens{})
-	foundTagToken := false
-	tagTokenRegex := regexp.MustCompile(`^tag[\d]?$`)
-	foundTagsToken := false
-	tagsTokensRegex := regexp.MustCompile(fmt.Sprintf(`^%s$`, tagsAttributeName))
-	for _, token := range bodyTokens {
-		if matched := tagTokenRegex.Match(token.Bytes); matched {
-			foundTagToken = true
-		}
-		if matched := tagsTokensRegex.Match(token.Bytes); matched {
-			foundTagsToken = true
-		}
-	}
-	if foundTagToken && foundTagsToken {
-		if _, okTags := resourceScheme.Attributes[tagsAttributeName]; okTags {
-			return true
-		}
-	}
-	return false
 }
 
 func (p *TerrraformParser) getTagsAttributeName(hclBlock *hclwrite.Block) (string, error) {
@@ -571,7 +627,13 @@ func (p *TerrraformParser) isBlockTaggable(hclBlock *hclwrite.Block) (bool, erro
 	if utils.InSlice(unsupportedTerraformBlocks, resourceType) {
 		return false, nil
 	}
-	if val, ok := p.taggableResourcesCache[resourceType]; ok {
+	if utils.InSlice(TfTaggableResourceTypes, resourceType) {
+		return true, nil
+	}
+	taggableResourcesLock.RLock()
+	val, ok := p.taggableResourcesCache[resourceType]
+	taggableResourcesLock.RUnlock()
+	if ok {
 		return val, nil
 	}
 	tagAtt, err := getTagAttributeByResourceType(resourceType)
@@ -599,7 +661,9 @@ func (p *TerrraformParser) isBlockTaggable(hclBlock *hclwrite.Block) (bool, erro
 			taggable = true
 		}
 	}
+	taggableResourcesLock.Lock()
 	p.taggableResourcesCache[resourceType] = taggable
+	taggableResourcesLock.Unlock()
 	return taggable, nil
 }
 
@@ -685,15 +749,17 @@ func (p *TerrraformParser) getClient(providerName string) tfschema.Client {
 		Level:  hclog.Error,
 		Output: hclog.DefaultOutput,
 	})
-	client, exists := p.providerToClientMap[providerName]
+	client, exists := p.providerToClientMap.Load(providerName)
 	if exists {
-		return client
+		return client.(tfschema.Client)
 	}
 	logger.MuteLogging()
+	logger.MuteLock.Lock()
 	newClient, err := tfschema.NewClient(providerName, tfschema.Option{
 		RootDir: p.terraformModule.ProvidersInstallDir,
 		Logger:  hclLogger,
 	})
+	logger.MuteLock.Unlock()
 	logger.UnmuteLogging()
 	if err != nil {
 		if strings.Contains(err.Error(), "Failed to find plugin") {
@@ -703,6 +769,6 @@ func (p *TerrraformParser) getClient(providerName string) tfschema.Client {
 		return nil
 	}
 
-	p.providerToClientMap[providerName] = newClient
+	p.providerToClientMap.Store(providerName, newClient)
 	return newClient
 }

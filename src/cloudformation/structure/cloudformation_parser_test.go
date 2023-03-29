@@ -31,11 +31,14 @@ func TestCloudformationParser_ParseFile(t *testing.T) {
 		assert.Equal(t, structure.Lines{Start: 3, End: 15}, newVolumeBlock.GetLines())
 		assert.Equal(t, "NewVolume", newVolumeBlock.GetResourceID())
 
+		rawFileLines, _ := cfnParser.FileToResourcesLines.Load(directory + "/ebs.yaml")
+		resourceLines := rawFileLines.(structure.Lines)
+
 		existingTag := newVolumeBlock.GetExistingTags()[0]
 		assert.Equal(t, "MyTag", existingTag.GetKey())
 		assert.Equal(t, "TagValue", existingTag.GetValue())
-		assert.Equal(t, 3, cfnParser.FileToResourcesLines[directory+"/ebs.yaml"].Start)
-		assert.Equal(t, 15, cfnParser.FileToResourcesLines[directory+"/ebs.yaml"].End)
+		assert.Equal(t, 3, resourceLines.Start)
+		assert.Equal(t, 15, resourceLines.End)
 	})
 	t.Run("parse ebs file json", func(t *testing.T) {
 		directory := "../../../tests/cloudformation/resources/ebs"
@@ -66,9 +69,13 @@ func TestCloudformationParser_ParseFile(t *testing.T) {
 		cfnParser.Init(directory, nil)
 		sourceFile := directory + "/base.template"
 		cfnBlocks, _ := cfnParser.ParseFile(sourceFile)
+
+		rawFileLines, _ := cfnParser.FileToResourcesLines.Load(sourceFile)
+		resourceLines := rawFileLines.(structure.Lines)
+
 		assert.Equal(t, 1, len(cfnBlocks))
-		assert.Equal(t, 2, cfnParser.FileToResourcesLines[sourceFile].Start)
-		assert.Equal(t, 9, cfnParser.FileToResourcesLines[sourceFile].End)
+		assert.Equal(t, 2, resourceLines.Start)
+		assert.Equal(t, 9, resourceLines.End)
 	})
 
 	t.Run("parse_special_cases", func(t *testing.T) {
@@ -78,6 +85,25 @@ func TestCloudformationParser_ParseFile(t *testing.T) {
 		sourceFile := directory + "/cfn.yaml"
 		cfnBlocks, _ := cfnParser.ParseFile(sourceFile)
 		assert.Equal(t, 3, len(cfnBlocks))
+	})
+
+	t.Run("parse Policy_PolicyTag", func(t *testing.T) {
+		directory := "../../../tests/cloudformation/resources/special_tags"
+		cfnParser := CloudformationParser{}
+		cfnParser.Init(directory, nil)
+		cfnBlocks, err := cfnParser.ParseFile(directory + "/cfn.yaml")
+		if err != nil {
+			t.Errorf("ParseFile() error = %v", err)
+			return
+		}
+		assert.Equal(t, 1, len(cfnBlocks))
+		testPolicy := cfnBlocks[0]
+		assert.Equal(t, structure.Lines{Start: 4, End: 10}, testPolicy.GetLines())
+		assert.Equal(t, "testPolicy", testPolicy.GetResourceID())
+
+		existingTag := testPolicy.GetExistingTags()[0]
+		assert.Equal(t, "isSpecial", existingTag.GetKey())
+		assert.Equal(t, "true", existingTag.GetValue())
 	})
 }
 
@@ -108,9 +134,9 @@ func Test_mapResourcesLineYAML(t *testing.T) {
 		resourcesNames := []string{"EC2InstanceResource0", "EC2InstanceResource1", "EC2LaunchTemplateResource0", "EC2LaunchTemplateResource1"}
 		expected := map[string]*structure.Lines{
 			"EC2InstanceResource0":       {Start: 2, End: 5},
-			"EC2InstanceResource1":       {Start: 6, End: 15},
-			"EC2LaunchTemplateResource0": {Start: 16, End: 20},
-			"EC2LaunchTemplateResource1": {Start: 21, End: 31},
+			"EC2InstanceResource1":       {Start: 7, End: 17},
+			"EC2LaunchTemplateResource0": {Start: 18, End: 23},
+			"EC2LaunchTemplateResource1": {Start: 24, End: 34},
 		}
 		actual := yaml.MapResourcesLineYAML(filePath, resourcesNames, ResourcesStartToken)
 		compareLines(t, expected, actual)
@@ -183,6 +209,12 @@ func TestWriteCFN(t *testing.T) {
 		writeCFNTestHelper(t, directory, "ebs", "yaml")
 	})
 
+	t.Run("test CFN yaml writing only type", func(t *testing.T) {
+		directory := "../../../tests/cloudformation/resources/onlyType"
+
+		writeCFNTestHelper(t, directory, "ecs", "json")
+	})
+
 	t.Run("test pre-tagged CFN json writing", func(t *testing.T) {
 		directory := "../../../tests/cloudformation/resources/ebs"
 		writeCFNTestHelper(t, directory, "ebs", "json")
@@ -201,6 +233,11 @@ func TestWriteCFN(t *testing.T) {
 	t.Run("test_multi_resource_tags_last_yaml", func(t *testing.T) {
 		directory, _ := filepath.Abs("../../../tests/cloudformation/resources/issue114")
 		writeCFNTestHelper(t, directory, "template", "yaml")
+	})
+
+	t.Run("test_non_cfn_tags", func(t *testing.T) {
+		directory, _ := filepath.Abs("../../../tests/cloudformation/resources/special_tags")
+		writeCFNTestHelper(t, directory, "cfn", "yaml")
 	})
 
 }

@@ -1,15 +1,21 @@
 package structure
 
 import (
+	stdjson "encoding/json"
 	"fmt"
 	"io/ioutil"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 
-	goformationTags "github.com/awslabs/goformation/v4/cloudformation/tags"
-	"github.com/bridgecrewio/goformation/v4"
-	"github.com/bridgecrewio/goformation/v4/intrinsics"
+	"reflect"
+
+	goformationTags "github.com/awslabs/goformation/v5/cloudformation/tags"
+	"github.com/bridgecrewio/goformation/v5"
+	"github.com/bridgecrewio/goformation/v5/cloudformation"
+	"github.com/bridgecrewio/goformation/v5/intrinsics"
 	"github.com/bridgecrewio/yor/src/common"
 	"github.com/bridgecrewio/yor/src/common/json"
 	"github.com/bridgecrewio/yor/src/common/logger"
@@ -18,8 +24,7 @@ import (
 	"github.com/bridgecrewio/yor/src/common/types"
 	"github.com/bridgecrewio/yor/src/common/utils"
 	"github.com/bridgecrewio/yor/src/common/yaml"
-
-	"reflect"
+	sanathyaml "github.com/sanathkr/yaml"
 )
 
 type CloudformationParser struct {
@@ -31,19 +36,23 @@ const TagsAttributeName = "Tags"
 const ResourcesStartToken = "Resources"
 const EnvVarsPath = "Resources/*/Properties/Environment/Variables/*"
 
+var goformationLock sync.Mutex
+
 func (p *CloudformationParser) Name() string {
 	return "CloudFormation"
 }
 
 func (p *CloudformationParser) Init(rootDir string, _ map[string]string) {
 	p.YamlParser = &types.YamlParser{
-		RootDir:              rootDir,
-		FileToResourcesLines: make(map[string]structure.Lines),
+		RootDir: rootDir,
 	}
 	p.JSONParser = &types.JSONParser{
-		RootDir:              rootDir,
-		FileToBracketMapping: make(map[string]map[int]json.BracketPair),
+		RootDir: rootDir,
 	}
+}
+
+func (p CloudformationParser) Close() {
+	return
 }
 
 func (p *CloudformationParser) GetSkippedDirs() []string {
@@ -54,10 +63,61 @@ func (p *CloudformationParser) GetSupportedFileExtensions() []string {
 	return []string{common.YamlFileType.Extension, common.YmlFileType.Extension, common.CFTFileType.Extension, common.JSONFileType.Extension}
 }
 
-func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, error) {
-	template, err := goformation.OpenWithOptions(filePath, &intrinsics.ProcessorOptions{
+// ValidFile Validate file has AWSTemplateFormatVersion
+func (p *CloudformationParser) ValidFile(filePath string) bool {
+	// #nosec G304
+	file, err := os.Open(filePath)
+	if err != nil {
+		logger.Warning(fmt.Sprintf("Error opening file %s, skipping: %v", filePath, err))
+		return false
+	}
+	bytes, err := ioutil.ReadAll(file)
+	if err != nil {
+		logger.Warning(fmt.Sprintf("Error reading file %s, skipping: %v", filePath, err))
+		return false
+	}
+	if err = file.Close(); err != nil {
+		logger.Warning(fmt.Sprintf("Error closing file %s, skipping: %v", filePath, err))
+		return false
+	}
+
+	if !strings.HasSuffix(filePath, ".json") {
+		bytes, err = sanathyaml.YAMLToJSON(bytes)
+		if err != nil {
+			logger.Warning(fmt.Sprintf("Error converting YAML to JSON for file %s, skipping: %v", filePath, err))
+			return false
+		}
+	}
+	var result map[string]interface{}
+	err = stdjson.Unmarshal(bytes, &result)
+	if err != nil {
+		logger.Warning(fmt.Sprintf("Error unmarshalling JSON for file %s, skipping: %v", filePath, err))
+		return false
+	}
+	_, hasHeader := result["AWSTemplateFormatVersion"]
+	return hasHeader
+}
+
+func goformationParse(file string) (*cloudformation.Template, error) {
+	var template *cloudformation.Template
+	var err error
+	defer func() {
+		if e := recover(); e != nil {
+			logger.Warning(fmt.Sprintf("Failed to parser cfn file at %v due to: %v", file, e))
+			err = fmt.Errorf("failed to parse cfn file %v: %v", file, e)
+		}
+	}()
+
+	template, err = goformation.OpenWithOptions(file, &intrinsics.ProcessorOptions{
 		StringifyPaths: []string{EnvVarsPath},
 	})
+	return template, err
+}
+
+func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, error) {
+	goformationLock.Lock()
+	template, err := goformationParse(filePath)
+	goformationLock.Unlock()
 	if err != nil || template == nil {
 		logger.Warning(fmt.Sprintf("There was an error processing the cloudformation template %v: %s", filePath, err))
 		if err == nil {
@@ -66,8 +126,13 @@ func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, e
 		return nil, err
 	}
 
+	if template.Transform != nil {
+		logger.Info(fmt.Sprintf("Skipping CFN template %s as SAM templates are not yet supported", filePath))
+		return nil, nil
+	}
+
 	resourceNames := make([]string, 0)
-	if template.Resources != nil {
+	if template.Resources != nil && len(template.Resources) > 0 {
 		for resourceName := range template.Resources {
 			resourceNames = append(resourceNames, resourceName)
 		}
@@ -79,7 +144,7 @@ func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, e
 		case common.JSONFileType.FileFormat:
 			var fileBracketsMapping map[int]json.BracketPair
 			resourceNamesToLines, fileBracketsMapping = json.MapResourcesLineJSON(filePath, resourceNames)
-			p.FileToBracketMapping[filePath] = fileBracketsMapping
+			p.FileToBracketMapping.Store(filePath, fileBracketsMapping)
 		default:
 			return nil, fmt.Errorf("unsupported file type %s", utils.GetFileFormat(filePath))
 		}
@@ -89,6 +154,7 @@ func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, e
 		parsedBlocks := make([]structure.IBlock, 0)
 		for resourceName := range template.Resources {
 			resource := template.Resources[resourceName]
+			resourceType := resource.AWSCloudFormationType()
 			lines := resourceNamesToLines[resourceName]
 			isTaggable, tagsValue := utils.StructContainsProperty(resource, TagsAttributeName)
 			tagsLines := structure.Lines{Start: -1, End: -1}
@@ -109,12 +175,13 @@ func (p *CloudformationParser) ParseFile(filePath string) ([]structure.IBlock, e
 					Lines:             *lines,
 					TagLines:          tagsLines,
 					Name:              resourceName,
+					Type:              resourceType,
 				},
 			}
 			parsedBlocks = append(parsedBlocks, cfnBlock)
 		}
 
-		p.FileToResourcesLines[filePath] = structure.Lines{Start: minResourceLine, End: maxResourceLine}
+		p.FileToResourcesLines.Store(filePath, structure.Lines{Start: minResourceLine, End: maxResourceLine})
 
 		return parsedBlocks, nil
 	}
@@ -130,7 +197,20 @@ func (p *CloudformationParser) extractTagsAndLines(filePath string, lines *struc
 func (p *CloudformationParser) GetExistingTags(tagsValue reflect.Value) []tags.ITag {
 	existingTags := make([]goformationTags.Tag, 0)
 	if tagsValue.Kind() == reflect.Slice {
-		existingTags = tagsValue.Interface().([]goformationTags.Tag)
+		ok := true
+		existingTags, ok = tagsValue.Interface().([]goformationTags.Tag)
+		if !ok {
+			for i := 0; i < tagsValue.Len(); i++ {
+				iTag := tagsValue.Index(i)
+
+				hasKey, tagKey := utils.StructContainsProperty(iTag.Interface(), "Key")
+				hasValue, tagValue := utils.StructContainsProperty(iTag.Interface(), "Value")
+				if hasKey && hasValue {
+					existingTag := goformationTags.Tag{Key: tagKey.String(), Value: tagValue.String()}
+					existingTags = append(existingTags, existingTag)
+				}
+			}
+		}
 	}
 
 	iTags := make([]tags.ITag, 0)
@@ -171,7 +251,8 @@ func (p *CloudformationParser) writeToFile(readFilePath string, blocks []structu
 	case common.YamlFileType.FileFormat, common.YmlFileType.FileFormat:
 		return yaml.WriteYAMLFile(readFilePath, blocks, writeFilePath, TagsAttributeName, ResourcesStartToken)
 	case common.JSONFileType.FileFormat:
-		return json.WriteJSONFile(readFilePath, blocks, writeFilePath, p.FileToBracketMapping[readFilePath])
+		bracketMapping, _ := p.FileToBracketMapping.Load(readFilePath)
+		return json.WriteJSONFile(readFilePath, blocks, writeFilePath, bracketMapping.(map[int]json.BracketPair))
 	default:
 		return fmt.Errorf("unsupported file type %s", utils.GetFileFormat(readFilePath))
 	}
@@ -181,7 +262,7 @@ func (p *CloudformationParser) getTagsLines(filePath string, resourceLinesRange 
 	nonFoundLines := structure.Lines{Start: -1, End: -1}
 	switch utils.GetFileFormat(filePath) {
 	case common.YamlFileType.FileFormat, common.YmlFileType.FileFormat:
-		file, scanner, _ := utils.GetFileScanner(filePath, &nonFoundLines)
+		scanner, _ := utils.GetFileScanner(filePath, &nonFoundLines)
 		resourceLinesText := make([]string, 0)
 		// iterate file line by line
 		lineCounter := 0
@@ -194,9 +275,6 @@ func (p *CloudformationParser) getTagsLines(filePath string, resourceLinesRange 
 			}
 			lineCounter++
 		}
-		defer func() {
-			_ = file.Close()
-		}()
 		linesInResource, tagsExist := yaml.FindTagsLinesYAML(resourceLinesText, TagsAttributeName)
 		if tagsExist {
 			return structure.Lines{Start: linesInResource.Start + resourceLinesRange.Start, End: linesInResource.Start + resourceLinesRange.Start + (linesInResource.End - linesInResource.Start)}
@@ -209,7 +287,8 @@ func (p *CloudformationParser) getTagsLines(filePath string, resourceLinesRange 
 			logger.Warning(fmt.Sprintf("failed to read file %s", filePath))
 			return structure.Lines{Start: -1, End: -1}
 		}
-		tagsBrackets := json.FindScopeInJSON(string(file), TagsAttributeName, p.FileToBracketMapping[filePath], resourceLinesRange)
+		bracketMapping, _ := p.FileToBracketMapping.Load(filePath)
+		tagsBrackets := json.FindScopeInJSON(string(file), TagsAttributeName, bracketMapping.(map[int]json.BracketPair), resourceLinesRange)
 		tagsLines := &structure.Lines{Start: tagsBrackets.Open.Line, End: tagsBrackets.Close.Line}
 		return *tagsLines
 	default:

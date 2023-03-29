@@ -33,14 +33,16 @@ type TerraformModule struct {
 func NewTerraformModule(rootDir string) *TerraformModule {
 	tfModule, diagnostics := tfconfig.LoadModule(rootDir)
 	if diagnostics != nil && diagnostics.HasErrors() {
-		logger.Error(diagnostics.Error())
+		logger.Warning(diagnostics.Error())
 		return nil
 	}
 	terraformModule := &TerraformModule{tfModule: tfModule, rootDir: rootDir}
-	// download terraform plugin into local folder if it doesn't exist
-	homeDir, _ := os.UserHomeDir()
-	terraformModule.ProvidersInstallDir = path.Join(homeDir, PluginsOutputDir)
-	terraformModule.InitProvider()
+	if strings.ToUpper(os.Getenv("YOR_SKIP_PROVIDER_DOWNLOAD")) != "TRUE" {
+		// download terraform plugin into local folder if it doesn't exist
+		homeDir, _ := os.UserHomeDir()
+		terraformModule.ProvidersInstallDir = path.Join(homeDir, PluginsOutputDir)
+		terraformModule.InitProvider()
+	}
 
 	return terraformModule
 }

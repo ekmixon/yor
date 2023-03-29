@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 	"plugin"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 
 	cfnStructure "github.com/bridgecrewio/yor/src/cloudformation/structure"
 	"github.com/bridgecrewio/yor/src/common"
@@ -24,15 +26,20 @@ import (
 )
 
 type Runner struct {
-	TagGroups         []tagging.ITagGroup
-	parsers           []common.IParser
-	ChangeAccumulator *reports.TagChangeAccumulator
-	reportingService  *reports.ReportService
-	dir               string
-	skipDirs          []string
-	skippedTags       []string
-	configFilePath    string
+	TagGroups            []tagging.ITagGroup
+	parsers              []common.IParser
+	ChangeAccumulator    *reports.TagChangeAccumulator
+	reportingService     *reports.ReportService
+	dir                  string
+	skipDirs             []string
+	skippedTags          []string
+	configFilePath       string
+	skippedResourceTypes []string
+	workersNum           int
+	dryRun               bool
 }
+
+const WorkersNumEnvKey = "YOR_WORKER_NUM"
 
 func (r *Runner) Init(commands *clioptions.TagOptions) error {
 	dir := commands.Directory
@@ -56,7 +63,24 @@ func (r *Runner) Init(commands *clioptions.TagOptions) error {
 			externalTagGroup.InitExternalTagGroups(commands.ConfigFile)
 		}
 	}
-	r.parsers = append(r.parsers, &tfStructure.TerrraformParser{}, &cfnStructure.CloudformationParser{}, &slsStructure.ServerlessParser{})
+	processedParsers := map[string]struct{}{}
+	for _, p := range commands.Parsers {
+		if _, exists := processedParsers[p]; exists {
+			continue
+		}
+		switch p {
+		case "Terraform":
+			r.parsers = append(r.parsers, &tfStructure.TerrraformParser{})
+		case "CloudFormation":
+			r.parsers = append(r.parsers, &cfnStructure.CloudformationParser{})
+		case "Serverless":
+			r.parsers = append(r.parsers, &slsStructure.ServerlessParser{})
+		default:
+			logger.Warning(fmt.Sprintf("ignoring unknown parser %#v", err))
+		}
+		processedParsers[p] = struct{}{}
+	}
+
 	for _, parser := range r.parsers {
 		parser.Init(dir, nil)
 	}
@@ -67,10 +91,24 @@ func (r *Runner) Init(commands *clioptions.TagOptions) error {
 	r.skippedTags = commands.SkipTags
 	r.skipDirs = append(commands.SkipDirs, ".git")
 	r.configFilePath = commands.ConfigFile
+	r.dryRun = commands.DryRun
 	if utils.InSlice(r.skipDirs, r.dir) {
 		logger.Warning(fmt.Sprintf("Selected dir, %s, is skipped - expect an empty result", r.dir))
 	}
+	r.skippedResourceTypes = commands.SkipResourceTypes
+	var convErr error
+	r.workersNum, convErr = strconv.Atoi(utils.GetEnv(WorkersNumEnvKey, "10"))
+	if convErr != nil {
+		logger.Error(fmt.Sprintf("Got an invalid value for YOR_WORKERS_NUM, %v. If you didn't mean to leverage this option, please unset %v", os.Getenv(WorkersNumEnvKey), WorkersNumEnvKey))
+	}
 	return nil
+}
+
+func (r *Runner) worker(fileChan chan string, wg *sync.WaitGroup) {
+	for file := range fileChan {
+		r.TagFile(file)
+		wg.Done()
+	}
 }
 
 func (r *Runner) TagDirectory() (*reports.ReportService, error) {
@@ -88,11 +126,34 @@ func (r *Runner) TagDirectory() (*reports.ReportService, error) {
 		logger.Error("Failed to run Walk() on root dir", r.dir)
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(len(files))
+	fileChan := make(chan string)
+
+	for i := 0; i < r.workersNum; i++ {
+		go r.worker(fileChan, &wg)
+	}
+
 	for _, file := range files {
-		r.TagFile(file)
+		fileChan <- file
+	}
+	close(fileChan)
+	wg.Wait()
+
+	for _, parser := range r.parsers {
+		parser.Close()
 	}
 
 	return r.reportingService, nil
+}
+
+func (r *Runner) isSkippedResourceType(resourceType string) bool {
+	for _, skippedResourceType := range r.skippedResourceTypes {
+		if resourceType == skippedResourceType {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runner) TagFile(file string) {
@@ -109,6 +170,9 @@ func (r *Runner) TagFile(file string) {
 		}
 		isFileTaggable := false
 		for _, block := range blocks {
+			if r.isSkippedResourceType(block.GetResourceType()) {
+				continue
+			}
 			if block.IsBlockTaggable() {
 				logger.Debug(fmt.Sprintf("Tagging %v:%v", file, block.GetResourceID()))
 				isFileTaggable = true
@@ -124,14 +188,13 @@ func (r *Runner) TagFile(file string) {
 			}
 			r.ChangeAccumulator.AccumulateChanges(block)
 		}
-		if isFileTaggable {
+		if isFileTaggable && !r.dryRun {
 			err = parser.WriteFile(file, blocks, file)
 			if err != nil {
 				logger.Warning(fmt.Sprintf("Failed writing tags to file %s, because %v", file, err))
 			}
 		}
 	}
-
 }
 
 func loadExternalResources(externalPaths []string) ([]tags.ITag, []tagging.ITagGroup, error) {
@@ -207,7 +270,7 @@ func extractExternalResources(plug *plugin.Plugin, symbol string) ([]interface{}
 func (r *Runner) isFileSkipped(p common.IParser, file string) bool {
 	relPath, _ := filepath.Rel(r.dir, file)
 	for _, sp := range r.skipDirs {
-		if strings.HasPrefix(relPath, sp) {
+		if strings.HasPrefix(r.dir+"/"+relPath, sp) {
 			return true
 		}
 	}
@@ -225,6 +288,9 @@ func (r *Runner) isFileSkipped(p common.IParser, file string) bool {
 		if strings.Contains(file, pattern) {
 			return true
 		}
+	}
+	if !p.ValidFile(file) {
+		return true
 	}
 	return false
 }

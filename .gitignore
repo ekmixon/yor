@@ -3,3 +3,5 @@
 .plugins
 *.so
 .gobuild
+dist/
+/yor

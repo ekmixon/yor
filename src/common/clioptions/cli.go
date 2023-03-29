@@ -15,15 +15,18 @@ import (
 var allowedOutputTypes = []string{"cli", "json"}
 
 type TagOptions struct {
-	Directory      string
-	Tag            []string
-	SkipTags       []string
-	CustomTagging  []string
-	SkipDirs       []string
-	Output         string `validate:"output"`
-	OutputJSONFile string
-	TagGroups      []string `validate:"tagGroupNames"`
-	ConfigFile     string   `validate:"config-file"`
+	Directory         string
+	Tag               []string
+	SkipTags          []string
+	CustomTagging     []string
+	SkipDirs          []string
+	Output            string `validate:"output"`
+	OutputJSONFile    string
+	TagGroups         []string `validate:"tagGroupNames"`
+	ConfigFile        string   `validate:"config-file"`
+	SkipResourceTypes []string
+	Parsers           []string
+	DryRun            bool
 }
 
 type ListTagsOptions struct {
@@ -40,6 +43,7 @@ func (o *TagOptions) Validate() {
 	o.CustomTagging = utils.SplitStringByComma(o.CustomTagging)
 	o.SkipDirs = utils.SplitStringByComma(o.SkipDirs)
 	o.TagGroups = utils.SplitStringByComma(o.TagGroups)
+	o.SkipResourceTypes = utils.SplitStringByComma(o.SkipResourceTypes)
 
 	if err := validator.Validate(o); err != nil {
 		logger.Error(err.Error())

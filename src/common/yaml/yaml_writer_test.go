@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/awslabs/goformation/v4/cloudformation/s3"
-	s3tags "github.com/awslabs/goformation/v4/cloudformation/tags"
+	"github.com/awslabs/goformation/v5/cloudformation/s3"
+	s3tags "github.com/awslabs/goformation/v5/cloudformation/tags"
 	"github.com/bridgecrewio/yor/src/common/structure"
 	"github.com/bridgecrewio/yor/src/common/tagging/simple"
 	"github.com/bridgecrewio/yor/src/common/tagging/tags"
@@ -207,5 +207,19 @@ func TestTagReplacement(t *testing.T) {
 		})
 		assert.Equal(t, tagLines[1], "            SomeKey: NewValue")
 		assert.Equal(t, tagLines[2], "            AnotherKey: !Ref VariableValue")
+	})
+
+	t.Run("Test line computation with duplicate - CFN", func(t *testing.T) {
+		res := MapResourcesLineYAML("../../../tests/cloudformation/resources/duplicate_entries/duplicate_cfn.yaml", []string{"S3Bucket", "CloudFrontDistribution"}, "Resources")
+		assert.Equal(t, *res["S3Bucket"], structure.Lines{Start: 14, End: 17})
+		assert.Equal(t, *res["CloudFrontDistribution"], structure.Lines{Start: 18, End: 60})
+	})
+
+	t.Run("Test line computation with duplicate - SLS", func(t *testing.T) {
+		res := MapResourcesLineYAML("../../../tests/cloudformation/resources/duplicate_entries/duplicate_sls.yaml", []string{"attribute", "zone", "customer", "apiVersion"}, "functions")
+		assert.Equal(t, *res["apiVersion"], structure.Lines{Start: 7, End: 12})
+		assert.Equal(t, *res["customer"], structure.Lines{Start: 14, End: 24})
+		assert.Equal(t, *res["zone"], structure.Lines{Start: 26, End: 38})
+		assert.Equal(t, *res["attribute"], structure.Lines{Start: 40, End: 53})
 	})
 }
